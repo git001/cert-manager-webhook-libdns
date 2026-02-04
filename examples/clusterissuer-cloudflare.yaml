@@ -1,0 +1,22 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod-cloudflare
+spec:
+  acme:
+    # Use Let's Encrypt production server
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+    - dns01:
+        webhook:
+          # Must match the groupName in values.yaml
+          groupName: acme.example.com
+          solverName: libdns
+          config:
+            provider: cloudflare
+            secretRef:
+              name: cloudflare-credentials
+              namespace: cert-manager

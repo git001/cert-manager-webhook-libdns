@@ -1,0 +1,64 @@
+# API group name for the webhook
+# This must be a domain you own to avoid conflicts
+groupName: acme.example.com
+
+# cert-manager configuration
+certManager:
+  namespace: cert-manager
+  serviceAccountName: cert-manager
+
+# Image configuration
+image:
+  repository: ghcr.io/your-org/cert-manager-webhook-libdns
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Name overrides
+nameOverride: ""
+fullnameOverride: ""
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 443
+
+# Replica count
+replicaCount: 1
+
+# Resource limits
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Pod scheduling
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod security context
+# Note: Do not set runAsUser/fsGroup on OpenShift - let it assign UID from namespace range
+podSecurityContext:
+  runAsNonRoot: true
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Logging verbosity (klog level)
+logLevel: 2
