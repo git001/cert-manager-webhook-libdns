@@ -28,19 +28,74 @@ These providers support the latest libdns API and can be added:
 
 ## Prerequisites
 
-- Kubernetes cluster (tested on OpenShift/CRC)
-- [cert-manager](https://cert-manager.io/) v1.0+ installed
+- Kubernetes cluster or OpenShift with cert-manager installed
 - [Helm](https://helm.sh/) v3+ for deployment
+- [Podman](https://podman.io/) or Buildah for building the image
+- A container registry (e.g., ghcr.io) for storing the image
 
-## Installation
+## Deployment Guide
 
-### 1. Install cert-manager
+### Step 1: Build and Push the Container Image
+
+#### 1.1 Login to your Container Registry
 
 ```bash
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.3/cert-manager.yaml
+# For GitHub Container Registry (ghcr.io)
+echo "<GITHUB_PAT>" | podman login ghcr.io -u <username> --password-stdin
 ```
 
-For DNS-01 challenges, configure cert-manager to use external DNS servers:
+> You need a GitHub PAT with `write:packages` scope. Create one at https://github.com/settings/tokens
+
+#### 1.2 Build the Image
+
+```bash
+podman build -t ghcr.io/<your-org>/cert-manager-webhook-libdns:v1 .
+```
+
+For multi-arch builds (amd64 + arm64):
+
+```bash
+podman manifest create ghcr.io/<your-org>/cert-manager-webhook-libdns:v1
+podman build --platform linux/amd64,linux/arm64 \
+  --manifest ghcr.io/<your-org>/cert-manager-webhook-libdns:v1 .
+podman manifest push ghcr.io/<your-org>/cert-manager-webhook-libdns:v1
+```
+
+#### 1.3 Push the Image
+
+```bash
+podman push ghcr.io/<your-org>/cert-manager-webhook-libdns:v1
+```
+
+#### 1.4 Image Visibility (ghcr.io)
+
+If the image is **public**, no further configuration is needed.
+
+If the image is **private**, create an ImagePullSecret in the target namespace:
+
+```bash
+kubectl create secret docker-registry ghcr-pull-secret \
+  --docker-server=ghcr.io \
+  --docker-username=<username> \
+  --docker-password=<GITHUB_PAT> \
+  -n cert-manager
+```
+
+Then add it to the Helm install:
+
+```bash
+--set imagePullSecrets[0].name=ghcr-pull-secret
+```
+
+### Step 2: Install and Configure cert-manager
+
+#### Standard Kubernetes
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+```
+
+Configure external DNS servers for DNS-01 challenge validation:
 
 ```bash
 kubectl patch deployment cert-manager -n cert-manager --type='json' \
@@ -48,27 +103,188 @@ kubectl patch deployment cert-manager -n cert-manager --type='json' \
        {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--dns01-recursive-nameservers-only"}]'
 ```
 
-### 2. Build and Push the Webhook Image
+#### OpenShift (with openshift-cert-manager-operator)
 
-```bash
-# Build the image
-podman build -t your-registry/libdns-webhook:v1 .
+If the cert-manager operator is already installed, configure it via the CertManager resource:
 
-# Push to your registry
-podman push your-registry/libdns-webhook:v1
+```yaml
+apiVersion: operator.openshift.io/v1alpha1
+kind: CertManager
+metadata:
+  name: cluster
+spec:
+  controllerConfig:
+    overrideArgs:
+      - "--dns01-recursive-nameservers=8.8.8.8:53,1.1.1.1:53"
+      - "--dns01-recursive-nameservers-only"
 ```
 
-### 3. Deploy the Webhook
+```bash
+oc apply -f certmanager-config.yaml
+```
+
+Verify the configuration was applied:
+
+```bash
+oc get pods -n cert-manager -l app=cert-manager
+oc logs -n cert-manager -l app=cert-manager | grep recursive
+```
+
+> **Note:** The cert-manager namespace may be `cert-manager` or `cert-manager-operator` depending on the operator version. Check with: `oc get pods -A | grep cert-manager`
+
+### Step 3: Deploy the Webhook
 
 ```bash
 helm install libdns-webhook ./deploy/libdns-webhook \
   --namespace cert-manager \
-  --set image.repository=your-registry/libdns-webhook \
+  --set image.repository=ghcr.io/<your-org>/cert-manager-webhook-libdns \
   --set image.tag=v1 \
   --set groupName=acme.yourdomain.com
 ```
 
 **Important:** The `groupName` must be a unique domain you control to avoid conflicts with other webhooks.
+
+On **OpenShift**, adjust the namespace and cert-manager service account if needed:
+
+```bash
+helm install libdns-webhook ./deploy/libdns-webhook \
+  --namespace openshift-cert-manager \
+  --set image.repository=ghcr.io/<your-org>/cert-manager-webhook-libdns \
+  --set image.tag=v1 \
+  --set groupName=acme.yourdomain.com \
+  --set certManager.namespace=openshift-cert-manager \
+  --set certManager.serviceAccountName=cert-manager
+```
+
+Verify the deployment:
+
+```bash
+# Check the webhook pod
+kubectl get pods -n cert-manager -l app.kubernetes.io/name=libdns-webhook
+kubectl logs -n cert-manager -l app.kubernetes.io/name=libdns-webhook
+
+# Check the APIService is registered
+kubectl get apiservices | grep acme.yourdomain.com
+```
+
+### Step 4: Create DNS Provider Credentials
+
+Create a Kubernetes Secret containing your DNS provider credentials (see [Provider-Specific Notes](#provider-specific-notes) for required keys):
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dns-provider-credentials
+  namespace: cert-manager
+type: Opaque
+stringData:
+  api_token: "<YOUR_API_TOKEN>"
+```
+
+```bash
+kubectl apply -f dns-credentials.yaml
+```
+
+### Step 5: Create a ClusterIssuer
+
+#### Let's Encrypt Staging (recommended for testing)
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.yourdomain.com
+            solverName: libdns
+            config:
+              provider: desec
+              ttl: 3600
+              secretRef:
+                name: dns-provider-credentials
+                namespace: cert-manager
+```
+
+> **Recommendation:** Test with the Staging server first to avoid hitting [Let's Encrypt rate limits](https://letsencrypt.org/docs/rate-limits/).
+
+#### Let's Encrypt Production
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - dns01:
+          webhook:
+            groupName: acme.yourdomain.com
+            solverName: libdns
+            config:
+              provider: desec
+              ttl: 3600
+              secretRef:
+                name: dns-provider-credentials
+                namespace: cert-manager
+```
+
+### Step 6: Request a Certificate
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-certificate
+  namespace: default
+spec:
+  secretName: my-tls-secret
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - example.com
+    - "*.example.com"
+  duration: 2160h      # 90 days
+  renewBefore: 720h    # Renew 30 days before expiry
+```
+
+### Step 7: Verify
+
+```bash
+# Certificate status
+kubectl get certificate -n default
+kubectl describe certificate my-certificate -n default
+
+# Challenge status (if pending)
+kubectl get challenges -A
+kubectl describe challenge -A
+
+# Webhook logs
+kubectl logs -n cert-manager -l app.kubernetes.io/name=libdns-webhook -f
+
+# Verify DNS TXT record
+dig TXT _acme-challenge.example.com @8.8.8.8
+```
+
+Once the certificate is issued, it will be stored in the Secret specified by `secretName`:
+
+```bash
+kubectl get secret my-tls-secret -n default -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -text -noout
+```
 
 ### Command Line Options
 
@@ -91,11 +307,23 @@ The webhook binary supports the following options:
 
 This is useful to verify which providers are available in your build.
 
-## Configuration
+## Configuration Reference
 
-### Create DNS Provider Credentials Secret
+### Webhook Config Fields
 
-Create a Kubernetes Secret containing your DNS provider credentials:
+The webhook configuration is provided in the ClusterIssuer/Issuer `config` section:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | DNS provider name (`desec`, `cloudflare`, `hetzner`, `route53`, `alidns`, `ovh`, `linode`) |
+| `secretRef.name` | string | Yes | Name of the Kubernetes Secret with provider credentials |
+| `secretRef.namespace` | string | No | Namespace of the Secret (defaults to challenge namespace) |
+| `ttl` | int | No | DNS record TTL in seconds (default: 300, deSEC requires minimum 3600) |
+| `zone` | string | No | Override the auto-detected DNS zone |
+
+### Credential Secrets per Provider
+
+**deSEC / Cloudflare / Hetzner / Linode** (single API token):
 
 ```yaml
 apiVersion: v1
@@ -105,10 +333,10 @@ metadata:
   namespace: cert-manager
 type: Opaque
 stringData:
-  api_token: "your-api-token-here"
+  api_token: "<YOUR_API_TOKEN>"
 ```
 
-For Route53:
+**Route53** (AWS credentials):
 
 ```yaml
 apiVersion: v1
@@ -120,53 +348,56 @@ type: Opaque
 stringData:
   access_key_id: "AKIAIOSFODNN7EXAMPLE"
   secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-  region: "us-east-1"
+  region: "us-east-1"              # optional
+  session_token: ""                 # optional, for temporary credentials
 ```
 
-### Create a ClusterIssuer
+**Alidns** (Alibaba Cloud):
 
 ```yaml
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
+apiVersion: v1
+kind: Secret
 metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: your-email@example.com
-    privateKeySecretRef:
-      name: letsencrypt-prod-account
-    solvers:
-      - dns01:
-          webhook:
-            groupName: acme.yourdomain.com  # Must match Helm groupName
-            solverName: libdns
-            config:
-              provider: desec  # or cloudflare, hetzner, route53
-              ttl: 3600  # Optional: TTL in seconds (default: 300, deSEC requires 3600)
-              secretRef:
-                name: dns-provider-credentials
-                namespace: cert-manager
-              # zone: example.com  # Optional: override auto-detected zone
+  name: alidns-credentials
+  namespace: cert-manager
+type: Opaque
+stringData:
+  access_key_id: "<ACCESS_KEY_ID>"
+  access_key_secret: "<ACCESS_KEY_SECRET>"
+  region_id: "cn-hangzhou"          # optional
+  security_token: ""                # optional, for temporary credentials
 ```
 
-### Request a Certificate
+**OVH:**
 
 ```yaml
-apiVersion: cert-manager.io/v1
-kind: Certificate
+apiVersion: v1
+kind: Secret
 metadata:
-  name: my-certificate
-  namespace: default
-spec:
-  secretName: my-tls-secret
-  issuerRef:
-    name: letsencrypt-prod
-    kind: ClusterIssuer
-  dnsNames:
-    - example.com
-    - "*.example.com"
+  name: ovh-credentials
+  namespace: cert-manager
+type: Opaque
+stringData:
+  endpoint: "ovh-eu"               # ovh-eu, ovh-ca, ovh-us, kimsufi-eu, etc.
+  application_key: "<APP_KEY>"
+  application_secret: "<APP_SECRET>"
+  consumer_key: "<CONSUMER_KEY>"
 ```
+
+### Helm Values
+
+Key values that can be overridden during `helm install`:
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `groupName` | `acme.example.com` | API group name (must be a domain you own) |
+| `image.repository` | `ghcr.io/your-org/cert-manager-webhook-libdns` | Container image repository |
+| `image.tag` | `latest` | Image tag |
+| `image.pullPolicy` | `IfNotPresent` | Image pull policy |
+| `certManager.namespace` | `cert-manager` | Namespace where cert-manager is installed |
+| `certManager.serviceAccountName` | `cert-manager` | cert-manager service account name |
+| `replicaCount` | `1` | Number of webhook replicas |
+| `logLevel` | `2` | klog verbosity level |
 
 ## Provider-Specific Notes
 
@@ -235,24 +466,47 @@ kubectl get challenges -A
 kubectl describe challenge <challenge-name> -n <namespace>
 ```
 
+### Check APIService Registration
+
+```bash
+kubectl get apiservices | grep acme.yourdomain.com
+kubectl get apiservice v1alpha1.acme.yourdomain.com -o yaml
+```
+
 ### Common Issues
 
 **1. "DNS record not yet propagated"**
-- Wait for DNS TTL to expire (can be up to 1 hour for providers with high minimum TTL)
+- Wait for DNS TTL to expire (can be up to 1 hour for providers with high minimum TTL like deSEC)
 - Verify the TXT record exists: `dig TXT _acme-challenge.yourdomain.com @8.8.8.8`
+- deSEC API-to-DNS propagation can take up to 2 minutes
 
 **2. "failed to get secret"**
 - Ensure the credentials secret exists in the correct namespace
 - Check RBAC permissions for the webhook service account
+- The Helm chart creates a `secret-reader` ClusterRole automatically
 
 **3. Pod fails to start on OpenShift**
-- The Helm chart is configured for OpenShift SCC compatibility
-- Do not set `runAsUser` or `fsGroup` explicitly
+- The Helm chart is configured for OpenShift SCC compatibility (`runAsNonRoot: true`, no `runAsUser`/`fsGroup`)
+- Do not set `runAsUser` or `fsGroup` explicitly - let OpenShift assign UIDs from the namespace range
 
 **4. "unknown DNS provider"**
 - Check that the provider name in the ClusterIssuer config matches a registered provider
 - Currently available: `alidns`, `cloudflare`, `desec`, `hetzner`, `linode`, `ovh`, `route53`
 - Use `--list-providers` to see compiled-in providers
+
+**5. APIService not registered**
+- Check that cert-manager CA injection is working:
+  ```bash
+  kubectl get apiservice v1alpha1.acme.yourdomain.com -o yaml | grep caBundle
+  ```
+- Verify the webhook service is reachable:
+  ```bash
+  kubectl get svc -n cert-manager -l app.kubernetes.io/name=libdns-webhook
+  ```
+
+**6. Image pull errors**
+- For ghcr.io: set the package visibility to **Public** under `https://github.com/users/<user>/packages/container/<package>/settings`
+- Or create an ImagePullSecret (see [Step 1.4](#14-image-visibility-ghcrio))
 
 ## Development
 

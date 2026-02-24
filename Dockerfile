@@ -1,6 +1,7 @@
 # Build dependencies stage
 FROM golang:1.25-alpine AS build_deps
 
+LABEL org.opencontainers.image.source https://github.com/git001/cert-manager-webhook-libdns
 RUN apk add --no-cache git
 
 WORKDIR /workspace
