@@ -1,0 +1,44 @@
+name: libdns Provider Compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure GitHub CLI is available
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+          gh --version
+
+      - name: Scan libdns provider compatibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LIBDNS_ORG: libdns
+          OUTPUT_DIR: reports/libdns-provider-compat
+          FAIL_ON_INCOMPATIBLE: "false"
+        run: |
+          bash scripts/check_libdns_provider_compat.sh
+
+      - name: Add report to workflow summary
+        run: |
+          cat reports/libdns-provider-compat/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libdns-provider-compat-report
+          path: reports/libdns-provider-compat/
+          if-no-files-found: error

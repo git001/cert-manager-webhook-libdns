@@ -2,3 +2,13 @@
 **/.vscode
 **/webhook
 **/:
+reports/
+
+# Go build/test artifacts
+**/.gocache/
+**/bin/
+*.test
+*.out
+*.prof
+.coverprofile
+coverage.out

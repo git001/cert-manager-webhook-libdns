@@ -1,7 +1,0 @@
-{
-  "provider": "desec",
-  "secretRef": {
-    "name": "desec-credentials",
-    "namespace": "cert-manager"
-  }
-}

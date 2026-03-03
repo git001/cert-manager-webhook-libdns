@@ -22,6 +22,12 @@ import (
 )
 
 func main() {
+	// Handle --version before webhook server takes over flag parsing
+	if slices.Contains(os.Args, "--version") {
+		fmt.Println(Version)
+		os.Exit(0)
+	}
+
 	// Handle --list-providers before webhook server takes over flag parsing
 	if slices.Contains(os.Args, "--list-providers") {
 		fmt.Println("Compiled-in DNS providers:")
@@ -41,7 +47,7 @@ func main() {
 
 // libdnsSolver implements the webhook.Solver interface using libdns providers
 type libdnsSolver struct {
-	client *kubernetes.Clientset
+	client kubernetes.Interface
 }
 
 // LibdnsConfig is the configuration for the libdns solver
@@ -105,7 +111,20 @@ func (s *libdnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	// Get existing records to merge with new value
 	existingRecords, err := provider.GetRecords(ctx, zone)
 	if err != nil {
-		klog.Warningf("Failed to get existing records (will try append): %v", err)
+		klog.Warningf("Failed to get existing records (falling back to append): %v", err)
+		records := []libdns.Record{
+			libdns.TXT{
+				Name: recordName,
+				TTL:  ttl,
+				Text: ch.Key,
+			},
+		}
+		appendedRecords, appendErr := provider.AppendRecords(ctx, zone, records)
+		if appendErr != nil {
+			return fmt.Errorf("failed to append TXT record after get failure: %w", appendErr)
+		}
+		klog.Infof("Successfully appended %d TXT record(s) for %s in zone %s", len(appendedRecords), recordName, zone)
+		return nil
 	}
 
 	// Collect existing TXT values for this record name
@@ -236,6 +255,9 @@ func (s *libdnsSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 // Default TTL for DNS records (in seconds)
 const defaultTTL = 300
 
+// deSEC enforces a minimum TTL of 3600 seconds.
+const desecMinTTL = 3600
+
 // getProvider creates the DNS provider based on configuration
 func (s *libdnsSolver) getProvider(ch *v1alpha1.ChallengeRequest) (providers.DNSProvider, string, time.Duration, error) {
 	cfg, err := loadConfig(ch.Config)
@@ -265,11 +287,18 @@ func (s *libdnsSolver) getProvider(ch *v1alpha1.ChallengeRequest) (providers.DNS
 	}
 	// libdns providers expect zone WITHOUT trailing dot
 	zone = strings.TrimSuffix(zone, ".")
+	if zone == "" {
+		return nil, "", 0, fmt.Errorf("resolved zone is empty; set config.zone or verify challenge resolvedZone")
+	}
 
 	// Determine TTL
 	ttl := time.Duration(cfg.TTL) * time.Second
 	if cfg.TTL <= 0 {
 		ttl = defaultTTL * time.Second
+	}
+	if cfg.Provider == "desec" && ttl < desecMinTTL*time.Second {
+		klog.Infof("Provider %s requires minimum TTL of %ds, overriding configured TTL to %ds", cfg.Provider, desecMinTTL, desecMinTTL)
+		ttl = desecMinTTL * time.Second
 	}
 
 	return provider, zone, ttl, nil
@@ -300,8 +329,11 @@ func (s *libdnsSolver) loadCredentials(ch *v1alpha1.ChallengeRequest, cfg *Libdn
 		namespace = ch.ResourceNamespace
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	secret, err := s.client.CoreV1().Secrets(namespace).Get(
-		context.Background(),
+		ctx,
 		cfg.SecretRef.Name,
 		metav1.GetOptions{},
 	)
@@ -324,11 +356,18 @@ func extractRecordName(fqdn, zone string) string {
 	fqdn = strings.TrimSuffix(fqdn, ".")
 	zone = strings.TrimSuffix(zone, ".")
 
-	// Remove zone suffix from FQDN
-	name := strings.TrimSuffix(fqdn, "."+zone)
-	if name == fqdn {
-		// Zone was not a suffix, try without the dot
-		name = strings.TrimSuffix(fqdn, zone)
+	// Apex record for the zone
+	if fqdn == zone {
+		return "@"
+	}
+
+	// Remove exact ".<zone>" suffix if present.
+	name := fqdn
+	if zone != "" {
+		suffix := "." + zone
+		if strings.HasSuffix(fqdn, suffix) {
+			name = strings.TrimSuffix(fqdn, suffix)
+		}
 	}
 
 	// Clean up any leading/trailing dots
