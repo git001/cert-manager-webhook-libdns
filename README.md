@@ -18,13 +18,13 @@ Currently enabled providers:
 
 Additional providers can be added easily - see [Adding a New Provider](#adding-a-new-provider) section.
 
-### Other Compatible Providers (libdns v1.1.x)
+### Compatibility Status (libdns v1.1.1)
 
-These providers support the latest libdns API and can be added:
+The repository includes an automated compatibility check against `github.com/libdns/libdns v1.1.1`.
 
-| Provider | Version | Module Path | Credential Keys |
-|----------|---------|-------------|-----------------|
-| **GoDaddy** | latest | `github.com/libdns/godaddy` | `api_token`, `api_secret` |
+- Latest generated report: [`docs/01_provider-compat-latest.md`](docs/01_provider-compat-latest.md)
+- Current snapshot in that report: **68 compatible**, **21 incompatible**, **1 skipped**
+- Workflow that updates the report: [`.github/workflows/libdns-provider-compat.yml`](.github/workflows/libdns-provider-compat.yml)
 
 ## Prerequisites
 
@@ -291,10 +291,15 @@ kubectl get secret my-tls-secret -n default -o jsonpath='{.data.tls\.crt}' | bas
 The webhook binary supports the following options:
 
 ```bash
+# Show webhook version (SemVer)
+./webhook --version
+
 # List compiled-in DNS providers
 ./webhook --list-providers
 
 # Example output:
+# v0.5.0
+#
 # Compiled-in DNS providers:
 #   - alidns
 #   - cloudflare
@@ -318,7 +323,7 @@ The webhook configuration is provided in the ClusterIssuer/Issuer `config` secti
 | `provider` | string | Yes | DNS provider name (`desec`, `cloudflare`, `hetzner`, `route53`, `alidns`, `ovh`, `linode`) |
 | `secretRef.name` | string | Yes | Name of the Kubernetes Secret with provider credentials |
 | `secretRef.namespace` | string | No | Namespace of the Secret (defaults to challenge namespace) |
-| `ttl` | int | No | DNS record TTL in seconds (default: 300, deSEC requires minimum 3600) |
+| `ttl` | int | No | DNS record TTL in seconds (default: 300; for deSEC values below 3600 are automatically raised to 3600) |
 | `zone` | string | No | Override the auto-detected DNS zone |
 
 ### Credential Secrets per Provider
@@ -403,7 +408,7 @@ Key values that can be overridden during `helm install`:
 
 ### deSEC
 
-- Minimum TTL is 3600 seconds (enforced by deSEC) - set `ttl: 3600` in config
+- Minimum TTL is 3600 seconds (enforced by deSEC). If omitted or lower, webhook automatically uses 3600.
 - API to DNS propagation can take up to 2 minutes
 - API token can be created at https://desec.io/tokens
 
@@ -510,6 +515,14 @@ kubectl get apiservice v1alpha1.acme.yourdomain.com -o yaml
 
 ## Development
 
+### Testing
+
+Run tests without external control-plane dependencies:
+
+```bash
+make test
+```
+
 ### Adding a New Provider
 
 This example shows how to add the **Hetzner** provider (v2.0.1) which supports the latest libdns v1.1.1.
@@ -523,19 +536,10 @@ curl -sL "https://raw.githubusercontent.com/libdns/hetzner/v2.0.1/go.mod" | grep
 # Should show: github.com/libdns/libdns v1.1.1
 ```
 
-**Compatible providers (as of Feb 2026):**
-| Provider | Version | Module Path |
-|----------|---------|-------------|
-| alidns | v1.0.6-beta.3 | `github.com/libdns/alidns` |
-| cloudflare | latest | `github.com/libdns/cloudflare` |
-| desec | v1.0.1 | `github.com/libdns/desec` |
-| godaddy | latest | `github.com/libdns/godaddy` |
-| hetzner | v2.0.1 | `github.com/libdns/hetzner/v2` |
-| linode | v0.5.0 | `github.com/libdns/linode` |
-| ovh | v1.1.0 | `github.com/libdns/ovh` |
-| route53 | v1.6.0 | `github.com/libdns/route53` |
+For the full and current compatible/incompatible provider list, use the generated compatibility report:
+[`docs/01_provider-compat-latest.md`](docs/01_provider-compat-latest.md).
 
-> **Note:** Providers with v2+ use a different module path (e.g., `/v2` suffix).
+> **Note:** Providers with v2+ use a different module path (e.g., `/v2` suffix), and compatibility can change over time as provider modules evolve.
 
 #### Step 2: Create the Provider File
 

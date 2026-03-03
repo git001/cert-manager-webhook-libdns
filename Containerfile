@@ -1,7 +1,6 @@
 # Build dependencies stage
-FROM golang:1.25-alpine AS build_deps
+FROM golang:1.26-alpine AS build_deps
 
-LABEL org.opencontainers.image.source https://github.com/git001/cert-manager-webhook-libdns
 RUN apk add --no-cache git
 
 WORKDIR /workspace
@@ -21,6 +20,14 @@ RUN CGO_ENABLED=0 go build -o webhook -ldflags '-s -w -extldflags "-static"' .
 
 # Runtime stage
 FROM alpine:3.21
+
+ARG OCI_SOURCE="https://github.com/git001/cert-manager-webhook-libdns"
+ARG OCI_REVISION=""
+ARG OCI_VERSION=""
+
+LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.version="${OCI_VERSION}"
 
 RUN apk add --no-cache ca-certificates bash curl
 

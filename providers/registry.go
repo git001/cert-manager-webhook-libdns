@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/libdns/libdns"
@@ -65,6 +66,7 @@ func ListProviders() []string {
 	for name := range globalRegistry.factories {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
