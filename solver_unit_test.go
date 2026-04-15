@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cert-manager-webhook-libdns/providers"
+	"github.com/cert-manager-webhook-libdns/libdnsregistry"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/libdns/libdns"
 	corev1 "k8s.io/api/core/v1"
@@ -97,11 +97,10 @@ func testProviderName(t *testing.T, suffix string) string {
 
 func registerMockProvider(t *testing.T, name string, mp *mockProvider) {
 	t.Helper()
-	providers.Register(name, func(config providers.ProviderConfig) (providers.DNSProvider, error) {
-		if len(config.Credentials) == 0 {
-			return nil, fmt.Errorf("expected credentials")
-		}
-		return mp, nil
+	libdnsregistry.Register(name, &libdnsregistry.RegistryProvider{
+		Init: func(conf [][]byte) (libdnsregistry.Provider, error) {
+			return mp, nil
+		},
 	})
 }
 
