@@ -11,10 +11,10 @@ keywords:
   - libdns
   - acme
   - letsencrypt
-home: https://github.com/your-org/cert-manager-webhook-libdns
+home: https://github.com/git001/cert-manager-webhook-libdns
 sources:
-  - https://github.com/your-org/cert-manager-webhook-libdns
+  - https://github.com/git001/cert-manager-webhook-libdns
   - https://github.com/libdns/libdns
 maintainers:
-  - name: Your Name
-    email: your@email.com
+  - name: git001
+    email: al-git001@none.at

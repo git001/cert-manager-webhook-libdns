@@ -9,7 +9,7 @@ certManager:
 
 # Image configuration
 image:
-  repository: ghcr.io/your-org/cert-manager-webhook-libdns
+  repository: ghcr.io/git001/cert-manager-webhook-libdns
   tag: latest
   pullPolicy: IfNotPresent
 
