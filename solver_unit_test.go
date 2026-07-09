@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -286,4 +287,185 @@ func TestGetProviderAppliesDesecMinTTL(t *testing.T) {
 	if ttl != desecMinTTL*time.Second {
 		t.Fatalf("expected TTL %s for deSEC, got %s", desecMinTTL*time.Second, ttl)
 	}
+}
+
+// syncPoint lets a test observe exactly when a provider call enters its
+// critical section, and hold it there until the test says to proceed.
+type syncPoint struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+// blockingProvider wraps mockProvider and pauses inside GetRecords until
+// released, so a test can deterministically force two Present()/CleanUp()
+// calls to overlap the way cert-manager does for wildcard + apex challenges
+// that share one DNS-01 record name.
+type blockingProvider struct {
+	*mockProvider
+	sync *syncPoint
+}
+
+func (p *blockingProvider) GetRecords(ctx context.Context, zone string) ([]libdns.Record, error) {
+	p.sync.entered <- struct{}{}
+	<-p.sync.release
+	return p.mockProvider.GetRecords(ctx, zone)
+}
+
+// TestPresentSerializesConcurrentChallengesForSameRecord reproduces the
+// wildcard+apex certificate scenario: cert-manager creates one Challenge per
+// SAN entry, both resolving to the same DNS-01 record name, and calls
+// Present() for them concurrently. Present() does a non-atomic
+// get-existing-values -> merge -> set-all-values cycle; without serializing
+// that cycle, the second call's SetRecords can clobber the first call's
+// still-pending value. This test fails if Present() is not holding a lock
+// across the whole read-modify-write cycle.
+func TestPresentSerializesConcurrentChallengesForSameRecord(t *testing.T) {
+	mp := &mockProvider{}
+	sp := &syncPoint{entered: make(chan struct{}), release: make(chan struct{})}
+	bp := &blockingProvider{mockProvider: mp, sync: sp}
+
+	providerName := testProviderName(t, "race")
+	providers.Register(providerName, func(config providers.ProviderConfig) (providers.DNSProvider, error) {
+		if len(config.Credentials) == 0 {
+			return nil, fmt.Errorf("expected credentials")
+		}
+		return bp, nil
+	})
+
+	solver := newTestSolver("cert-manager", "dns-creds")
+	makeChallenge := func(key string) *v1alpha1.ChallengeRequest {
+		return &v1alpha1.ChallengeRequest{
+			ResolvedFQDN:      "_acme-challenge.staging.example.com.",
+			ResolvedZone:      "example.com.",
+			Key:               key,
+			ResourceNamespace: "cert-manager",
+			Config:            challengeConfigJSON(t, providerName, "dns-creds", "", 120),
+		}
+	}
+
+	done := make(chan error, 2)
+	go func() { done <- solver.Present(makeChallenge("apex-value")) }()
+
+	// Wait for the first call to be inside its critical section (blocked in GetRecords).
+	<-sp.entered
+
+	// Start the second, concurrent Present() call for the SAME record name.
+	go func() { done <- solver.Present(makeChallenge("wildcard-value")) }()
+
+	// It must NOT be able to enter GetRecords while the first call still
+	// holds the lock - if it does, the two calls are unserialized.
+	select {
+	case <-sp.entered:
+		t.Fatal("second Present() entered its critical section while the first was still in progress - Present() is not serialized across concurrent challenges")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Let the first call finish, then the second proceeds through the same path.
+	sp.release <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("first Present() failed: %v", err)
+	}
+
+	<-sp.entered
+	sp.release <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("second Present() failed: %v", err)
+	}
+
+	values := txtValuesForName(mp.records, "_acme-challenge.staging")
+	for _, key := range []string{"apex-value", "wildcard-value"} {
+		if !slices.Contains(values, key) {
+			t.Fatalf("expected both concurrent challenge values to survive, got %v (missing %q)", values, key)
+		}
+	}
+}
+
+// TestCleanUpSerializesConcurrentChallengesForSameRecord mirrors the Present
+// test for CleanUp(): removing one challenge's value must not race with
+// another challenge's concurrent CleanUp() for the same record name.
+func TestCleanUpSerializesConcurrentChallengesForSameRecord(t *testing.T) {
+	mp := &mockProvider{
+		records: []libdns.Record{
+			libdns.TXT{Name: "_acme-challenge.staging", Text: "apex-value", TTL: 120 * time.Second},
+			libdns.TXT{Name: "_acme-challenge.staging", Text: "wildcard-value", TTL: 120 * time.Second},
+		},
+	}
+	sp := &syncPoint{entered: make(chan struct{}), release: make(chan struct{})}
+	bp := &blockingProvider{mockProvider: mp, sync: sp}
+
+	providerName := testProviderName(t, "race-cleanup")
+	providers.Register(providerName, func(config providers.ProviderConfig) (providers.DNSProvider, error) {
+		if len(config.Credentials) == 0 {
+			return nil, fmt.Errorf("expected credentials")
+		}
+		return bp, nil
+	})
+
+	solver := newTestSolver("cert-manager", "dns-creds")
+	makeChallenge := func(key string) *v1alpha1.ChallengeRequest {
+		return &v1alpha1.ChallengeRequest{
+			ResolvedFQDN:      "_acme-challenge.staging.example.com.",
+			ResolvedZone:      "example.com.",
+			Key:               key,
+			ResourceNamespace: "cert-manager",
+			Config:            challengeConfigJSON(t, providerName, "dns-creds", "", 120),
+		}
+	}
+
+	done := make(chan error, 2)
+	go func() { done <- solver.CleanUp(makeChallenge("apex-value")) }()
+	<-sp.entered
+
+	go func() { done <- solver.CleanUp(makeChallenge("wildcard-value")) }()
+	select {
+	case <-sp.entered:
+		t.Fatal("second CleanUp() entered its critical section while the first was still in progress - CleanUp() is not serialized across concurrent challenges")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sp.release <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("first CleanUp() failed: %v", err)
+	}
+
+	<-sp.entered
+	sp.release <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("second CleanUp() failed: %v", err)
+	}
+
+	if len(mp.records) != 0 {
+		t.Fatalf("expected both values to be removed, got %v", mp.records)
+	}
+}
+
+// TestConcurrentPresentsDoNotDataRace exercises Present() from many
+// goroutines under `go test -race` to catch any remaining unsynchronized
+// access to the provider/mockProvider state, beyond the deterministic
+// interleaving already covered above.
+func TestConcurrentPresentsDoNotDataRace(t *testing.T) {
+	mp := &mockProvider{}
+	providerName := testProviderName(t, "race-detector")
+	registerMockProvider(t, providerName, mp)
+
+	solver := newTestSolver("cert-manager", "dns-creds")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ch := &v1alpha1.ChallengeRequest{
+				ResolvedFQDN:      "_acme-challenge.staging.example.com.",
+				ResolvedZone:      "example.com.",
+				Key:               fmt.Sprintf("value-%d", i),
+				ResourceNamespace: "cert-manager",
+				Config:            challengeConfigJSON(t, providerName, "dns-creds", "", 120),
+			}
+			if err := solver.Present(ch); err != nil {
+				t.Errorf("Present failed: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

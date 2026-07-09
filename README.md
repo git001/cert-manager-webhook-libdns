@@ -1,5 +1,7 @@
 # cert-manager-webhook-libdns
 
+[![Release](https://github.com/git001/cert-manager-webhook-libdns/actions/workflows/release-container.yml/badge.svg)](https://github.com/git001/cert-manager-webhook-libdns/actions/workflows/release-container.yml)
+
 A cert-manager webhook solver for DNS-01 challenges using [libdns](https://github.com/libdns/libdns) providers. This allows you to use any DNS provider that has a libdns implementation for ACME DNS-01 certificate validation.
 
 ## Supported DNS Providers

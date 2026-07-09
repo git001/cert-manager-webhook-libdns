@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
@@ -48,6 +49,13 @@ func main() {
 // libdnsSolver implements the webhook.Solver interface using libdns providers
 type libdnsSolver struct {
 	client kubernetes.Interface
+
+	// Present/CleanUp do a non-atomic get-modify-set against the DNS provider API.
+	// Wildcard + apex certs (e.g. *.example.com + example.com) produce two Challenges
+	// that share the same TXT record name (_acme-challenge.example.com), and
+	// cert-manager fires their Present()/CleanUp() concurrently — without this lock,
+	// two overlapping get-modify-set cycles can clobber each other's TXT value.
+	mu sync.Mutex
 }
 
 // LibdnsConfig is the configuration for the libdns solver
@@ -96,6 +104,9 @@ func (s *libdnsSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan s
 // It handles multiple TXT values for the same name (needed for wildcard + base domain certs)
 func (s *libdnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	klog.Infof("Present called: fqdn=%s zone=%s key=%s", ch.ResolvedFQDN, ch.ResolvedZone, ch.Key)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	provider, zone, ttl, err := s.getProvider(ch)
 	if err != nil {
@@ -172,6 +183,9 @@ func (s *libdnsSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 // It handles multiple TXT values for the same name by only removing the specific value
 func (s *libdnsSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	klog.Infof("CleanUp called: fqdn=%s zone=%s key=%s", ch.ResolvedFQDN, ch.ResolvedZone, ch.Key)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	provider, zone, ttl, err := s.getProvider(ch)
 	if err != nil {
