@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"os"
 	"regexp"
+	"text/template"
 )
 
 const (
@@ -94,11 +94,6 @@ func generateCode(path string, providers []providerTemplate) {
 	if err := registryTpl.Execute(content, providers); err != nil {
 		panic(err)
 	}
-
-	// formattedContent, err := format.Source(content.Bytes())
-	// if err != nil {
-	// 	panic(err)
-	// }
 
 	//nolint:gosec,mnd
 	if err := os.WriteFile(path, content.Bytes(), 0o644); err != nil {
