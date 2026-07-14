@@ -31,8 +31,9 @@ func main() {
 
 	// Handle --list-providers before webhook server takes over flag parsing
 	if slices.Contains(os.Args, "--list-providers") {
-		fmt.Println("Compiled-in DNS providers:")
-		for _, p := range libdnsregistry.List() {
+		providers := libdnsregistry.List()
+		fmt.Printf("Compiled-in DNS providers (%d):\n", len(providers))
+		for _, p := range providers {
 			fmt.Printf("  - %s\n", p)
 		}
 		os.Exit(0)
