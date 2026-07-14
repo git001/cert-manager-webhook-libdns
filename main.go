@@ -1,5 +1,6 @@
 package main
 
+//go:generate go run ./libdnsregistry/generate/generate.go code reports/libdns-provider-compat/providers.json libdnsregistry/providers.go
 import (
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cert-manager-webhook-libdns/libdnsregistry"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
 	"github.com/libdns/libdns"
@@ -18,8 +20,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
-
-	"github.com/cert-manager-webhook-libdns/providers"
 )
 
 func main() {
@@ -32,7 +32,7 @@ func main() {
 	// Handle --list-providers before webhook server takes over flag parsing
 	if slices.Contains(os.Args, "--list-providers") {
 		fmt.Println("Compiled-in DNS providers:")
-		for _, p := range providers.ListProviders() {
+		for _, p := range libdnsregistry.List() {
 			fmt.Printf("  - %s\n", p)
 		}
 		os.Exit(0)
@@ -96,7 +96,7 @@ func (s *libdnsSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan s
 	s.client = client
 
 	klog.Info("libdns solver initialized")
-	klog.Infof("Available providers: %v", providers.ListProviders())
+	klog.Infof("Available providers: %v", libdnsregistry.List())
 	return nil
 }
 
@@ -273,7 +273,7 @@ const defaultTTL = 300
 const desecMinTTL = 3600
 
 // getProvider creates the DNS provider based on configuration
-func (s *libdnsSolver) getProvider(ch *v1alpha1.ChallengeRequest) (providers.DNSProvider, string, time.Duration, error) {
+func (s *libdnsSolver) getProvider(ch *v1alpha1.ChallengeRequest) (libdnsregistry.Provider, string, time.Duration, error) {
 	cfg, err := loadConfig(ch.Config)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("failed to load config: %w", err)
@@ -287,9 +287,12 @@ func (s *libdnsSolver) getProvider(ch *v1alpha1.ChallengeRequest) (providers.DNS
 		return nil, "", 0, fmt.Errorf("failed to load credentials: %w", err)
 	}
 
-	provider, err := providers.CreateProvider(cfg.Provider, providers.ProviderConfig{
-		Credentials: credentials,
-	})
+	// There are other ways to assign a map to a struct but this is *by far* the easiest
+	confs, err := json.Marshal(credentials)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("failed to marshal credentials as json: %w", err)
+	}
+	provider, err := libdnsregistry.New(cfg.Provider, [][]byte{confs})
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("failed to create %s provider: %w", cfg.Provider, err)
 	}
