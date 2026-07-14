@@ -96,13 +96,16 @@ func testProviderName(t *testing.T, suffix string) string {
 	return fmt.Sprintf("test-%s-%s", strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-"), suffix)
 }
 
-func registerMockProvider(t *testing.T, name string, mp *mockProvider) {
+func registerMockProvider(t *testing.T, name string, provider libdnsregistry.Provider) {
 	t.Helper()
-	libdnsregistry.Register(name, &libdnsregistry.RegistryProvider{
+	err := libdnsregistry.Register(name, &libdnsregistry.RegistryProvider{
 		Init: func(conf [][]byte) (libdnsregistry.Provider, error) {
-			return mp, nil
+			return provider, nil
 		},
 	})
+	if err != nil {
+		t.Fatalf("failed to register mock provider %q: %v", name, err)
+	}
 }
 
 func challengeConfigJSON(t *testing.T, providerName, secretName, secretNamespace string, ttl int) *extapi.JSON {
@@ -324,12 +327,7 @@ func TestPresentSerializesConcurrentChallengesForSameRecord(t *testing.T) {
 	bp := &blockingProvider{mockProvider: mp, sync: sp}
 
 	providerName := testProviderName(t, "race")
-	providers.Register(providerName, func(config providers.ProviderConfig) (providers.DNSProvider, error) {
-		if len(config.Credentials) == 0 {
-			return nil, fmt.Errorf("expected credentials")
-		}
-		return bp, nil
-	})
+	registerMockProvider(t, providerName, bp)
 
 	solver := newTestSolver("cert-manager", "dns-creds")
 	makeChallenge := func(key string) *v1alpha1.ChallengeRequest {
@@ -393,12 +391,7 @@ func TestCleanUpSerializesConcurrentChallengesForSameRecord(t *testing.T) {
 	bp := &blockingProvider{mockProvider: mp, sync: sp}
 
 	providerName := testProviderName(t, "race-cleanup")
-	providers.Register(providerName, func(config providers.ProviderConfig) (providers.DNSProvider, error) {
-		if len(config.Credentials) == 0 {
-			return nil, fmt.Errorf("expected credentials")
-		}
-		return bp, nil
-	})
+	registerMockProvider(t, providerName, bp)
 
 	solver := newTestSolver("cert-manager", "dns-creds")
 	makeChallenge := func(key string) *v1alpha1.ChallengeRequest {
