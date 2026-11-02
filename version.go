@@ -4,4 +4,4 @@ package main
 // It can be overridden at build time via:
 //
 //	-ldflags "-X main.Version=vX.Y.Z"
-var Version = "v1.1.0"
+var Version = "v1.1.1"
